@@ -1,17 +1,18 @@
 .aider*
 
- # Terraform files
- **/.terraform/            # Match .terraform in any directory
- **/*.tfstate             # All .tfstate files in any directory
- **/*.tfstate.*           # Backup files in any location
- **/.terraform.tfstate.lock.info
- **/override.tf           # Local overrides anywhere
- **/override.tf.json
- **/*_override.tf
- **/*_override.tf.json
+# Terraform files
+*/.terraform/
+**/.terraform/            # Match .terraform in any directory
+**/*.tfstate             # All .tfstate files in any directory
+**/*.tfstate.*           # Backup files in any location
+**/.terraform.tfstate.lock.info
+**/override.tf           # Local overrides anywhere
+**/override.tf.json
+**/*_override.tf
+**/*_override.tf.json
 
- # Environment/editor files
- .env                     # Environment variables
- .idea/                   # JetBrains IDE
- .vscode/                 # VS Code config
- .DS_Store                # macOS metadata
+# Environment/editor files
+.env                     # Environment variables
+.idea/                   # JetBrains IDE
+.vscode/                 # VS Code config
+.DS_Store                # macOS metadata
