@@ -11,37 +11,35 @@ provider "aws" {
   region = var.aws_region
 }
 
-resource "aws_vpc" "vpc" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags = {
-    Name        = "eks-vpc"
-    Environment = var.environment
-  }
+locals {
+  vpc_cidr = "10.0.0.0/16"
+  azs      = slice(data.aws_availability_zones.available.names, 0, 2)
 }
 
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.vpc.id
-  tags = {
-    Name = "eks-igw"
-  }
-}
-
-data "aws_availability_zones" "azs" {
+data "aws_availability_zones" "available" {
   state = "available"
 }
 
-resource "aws_subnet" "subnet" {
-  count = 2
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
 
-  availability_zone = element(data.aws_availability_zones.azs.names, count.index)
-  vpc_id            = aws_vpc.vpc.id
-  cidr_block        = var.subnet_cidr[count.index]
+  name = "${var.cluster_name}-${var.environment}"
+  cidr = local.vpc_cidr
+
+  azs            = local.azs
+  public_subnets = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 48)]
+
+  enable_nat_gateway      = false
+  map_public_ip_on_launch = true
+
+  public_subnet_tags = {
+    "kubernetes.io/role/elb"                    = 1
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+    Environment                                 = var.environment
+  }
 
   tags = {
-    Name = "eks-subnet-${count.index + 1}"
+    Environment = var.environment
   }
 }
-
-
