@@ -12,8 +12,8 @@ module "eks" {
   enable_cluster_creator_admin_permissions = true
 
   access_entries = {
-    eks-admin-user = {
-      principal_arn   = aws_iam_user.eks_user.arn
+    eks-admin-role = {
+      principal_arn   = aws_iam_role.eks_admin_role.arn
       policy_associations = {
         cluster-admin = {
           policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
