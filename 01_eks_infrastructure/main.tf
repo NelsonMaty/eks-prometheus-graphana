@@ -8,20 +8,17 @@ module "eks" {
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.public_subnets
 
-  authentication_mode = "API"
-  enable_cluster_creator_admin_permissions = true
+  cluster_endpoint_public_access  = true
+  cluster_endpoint_private_access = true
 
-  access_entries = {
-    eks-admin-role = {
-      principal_arn   = aws_iam_role.eks_admin_role.arn
-      policy_associations = {
-        cluster-admin = {
-          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-          access_scope = {
-            type = "cluster"
-          }
-        }
-      }
+  cluster_security_group_additional_rules = {
+    ingress_from_bastion = {
+      description              = "Allow bastion to API server"
+      protocol                 = "tcp"
+      from_port                = 443
+      to_port                  = 443
+      source_security_group_id = aws_security_group.bastion_sg.id
+      type                     = "ingress"
     }
   }
 
@@ -33,14 +30,10 @@ module "eks" {
 
   eks_managed_node_groups = {
     main = {
-      name = "worker-group-${var.environment}"
       instance_types = ["t2.micro"]
-      min_size     = 1
-      max_size     = 2
-      desired_size = 1
-      tags = {
-        Environment = var.environment
-      }
+      min_size       = 1
+      max_size       = 2
+      desired_size   = 1
     }
   }
 

@@ -14,10 +14,15 @@ provider "aws" {
 locals {
   vpc_cidr = "10.0.0.0/16"
   azs      = slice(data.aws_availability_zones.available.names, 0, 2)
+  my_ip    = chomp(data.http.my_ip.response_body)
 }
 
 data "aws_availability_zones" "available" {
   state = "available"
+}
+
+data "http" "my_ip" {
+  url = "https://api.ipify.org"
 }
 
 module "vpc" {
@@ -42,4 +47,51 @@ module "vpc" {
   tags = {
     Environment = var.environment
   }
+}
+
+resource "aws_security_group" "bastion_sg" {
+  name_prefix = "bastion-sg"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["${local.my_ip}/32"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_key_pair" "bastion" {
+  key_name   = "eks-bastion-key"
+  public_key = file("~/.ssh/eks-bastion-key.pub")
+}
+
+resource "aws_instance" "bastion" {
+  ami           = "ami-0c7217cdde317cfec"
+  instance_type = "t2.micro"
+  subnet_id     = module.vpc.public_subnets[0]
+  vpc_security_group_ids = [aws_security_group.bastion_sg.id]
+  key_name      = aws_key_pair.bastion.key_name
+  iam_instance_profile = aws_iam_instance_profile.bastion.name
+
+  tags = {
+    Name = "eks-bastion"
+  }
+
+  user_data = <<-EOT
+    #!/bin/bash
+    sudo yum update -y
+    sudo yum install -y docker jq
+    sudo systemctl start docker
+    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+    rm -f kubectl
+  EOT
 }
