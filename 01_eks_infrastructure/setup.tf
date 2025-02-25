@@ -78,8 +78,12 @@ resource "aws_instance" "bastion" {
   instance_type = "t2.micro"
   subnet_id     = module.vpc.public_subnets[0]
   vpc_security_group_ids = [aws_security_group.bastion_sg.id]
-  key_name      = aws_key_pair.bastion.key_name
   iam_instance_profile = aws_iam_instance_profile.bastion.name
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
 
   tags = {
     Name = "eks-bastion"
@@ -88,10 +92,8 @@ resource "aws_instance" "bastion" {
   user_data = <<-EOT
     #!/bin/bash
     sudo yum update -y
-    sudo yum install -y docker jq
-    sudo systemctl start docker
-    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-    sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-    rm -f kubectl
+    sudo yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+    sudo systemctl enable amazon-ssm-agent
+    sudo systemctl start amazon-ssm-agent
   EOT
 }
