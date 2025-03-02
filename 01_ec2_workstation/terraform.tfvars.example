@@ -1,0 +1,19 @@
+# Example terraform.tfvars file
+# Copy this to terraform.tfvars and customize as needed
+
+# EC2 configuration
+instance_type = "t2.micro"
+instance_name = "DevOps-Workstation"
+region        = "us-east-1"
+volume_size   = 20
+
+# SSH keys
+key_name    = "pin"
+ssh_key_path = "~/.ssh/pin.pub"
+
+# Additional team member SSH keys - add your team's public keys here
+additional_ssh_keys = [
+  # Example format:
+  # "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABA... user1@example.com",
+  # "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABA... user2@example.com"
+]
