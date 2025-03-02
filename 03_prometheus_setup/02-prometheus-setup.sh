@@ -2,7 +2,7 @@
 
 # complete-prometheus-setup.sh
 # Comprehensive script to set up Prometheus on an EKS cluster with public access
-# This script handles installation, configuration, and exposing Prometheus publicly
+# This script installs Prometheus with alertmanager persistence disabled to avoid PVC issues
 
 set -e # Exit immediately if a command exits with a non-zero status
 
@@ -111,6 +111,10 @@ if kubectl get namespace ${PROMETHEUS_NAMESPACE} >/dev/null 2>&1; then
     if [[ $REPLY =~ ^[Yy]$ ]]; then
       echo "Uninstalling Prometheus..."
       helm uninstall prometheus -n ${PROMETHEUS_NAMESPACE}
+
+      # Delete all PVCs to ensure clean state
+      echo "Deleting all persistent volume claims..."
+      kubectl delete pvc --all -n ${PROMETHEUS_NAMESPACE}
 
       # Wait a moment for resources to be cleaned up
       echo "Waiting for resources to be cleaned up..."
@@ -294,53 +298,12 @@ if kubectl get svc -n ${PROMETHEUS_NAMESPACE} prometheus-external >/dev/null 2>&
 fi
 
 # -----------------
-# Get the correct labels for the Prometheus server pod
-# -----------------
-echo "Detecting Prometheus server pod labels..."
-
-# Get the server pod
-SERVER_POD=$(kubectl get pods -n ${PROMETHEUS_NAMESPACE} -l "app.kubernetes.io/name=prometheus,app.kubernetes.io/component=server" -o name 2>/dev/null || echo "")
-
-if [ -z "$SERVER_POD" ]; then
-  print_warning "Could not find Prometheus server pod with expected labels"
-  echo "Trying alternative label selectors..."
-
-  # Try alternative label patterns
-  SERVER_POD=$(kubectl get pods -n ${PROMETHEUS_NAMESPACE} | grep server | head -n 1 | awk '{print $1}')
-
-  if [ -z "$SERVER_POD" ]; then
-    print_error "Could not find Prometheus server pod. Please check the installation."
-    exit 1
-  fi
-fi
-
-echo "Found Prometheus server pod: ${SERVER_POD}"
-
-# Get the pod labels
-POD_LABELS=$(kubectl get pod -n ${PROMETHEUS_NAMESPACE} ${SERVER_POD} -o json | jq -r '.metadata.labels')
-echo "Pod labels: ${POD_LABELS}"
-
-# Extract the component and name labels for the selector
-COMPONENT_LABEL=$(echo ${POD_LABELS} | jq -r 'to_entries | .[] | select(.key | contains("component")) | "\(.key)=\(.value)"')
-NAME_LABEL=$(echo ${POD_LABELS} | jq -r 'to_entries | .[] | select(.key | contains("name")) | "\(.key)=\(.value)"')
-
-if [ -z "$COMPONENT_LABEL" ] || [ -z "$NAME_LABEL" ]; then
-  print_warning "Could not extract component and name labels automatically"
-  echo "Using default label selectors"
-  SELECTOR="app.kubernetes.io/name=prometheus,app.kubernetes.io/component=server"
-else
-  SELECTOR="${COMPONENT_LABEL},${NAME_LABEL}"
-fi
-
-echo "Using selector: ${SELECTOR}"
-
-# -----------------
 # Create the LoadBalancer service
 # -----------------
 echo "Creating LoadBalancer service for Prometheus..."
 
-# Create the service
-cat <<EOF | kubectl apply -f -
+# Create a service manifest file
+cat >prometheus-external-service.yaml <<EOF
 apiVersion: v1
 kind: Service
 metadata:
@@ -357,8 +320,12 @@ spec:
     protocol: TCP
     name: http
   selector:
-    $(echo ${SELECTOR} | sed 's/,/\n    /g')
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: server
 EOF
+
+# Apply the service manifest
+kubectl apply -f prometheus-external-service.yaml
 
 print_success "LoadBalancer service created"
 
@@ -377,23 +344,11 @@ while [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
   # Check for endpoints first
   ENDPOINTS=$(kubectl get endpoints -n ${PROMETHEUS_NAMESPACE} prometheus-external -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null)
 
-  if [ -z "$ENDPOINTS" ]; then
-    print_warning "Service has no endpoints. Checking selector..."
+  if [ -z "$ENDPOINTS" ] && [ $ATTEMPTS -eq 10 ]; then
+    print_warning "Service has no endpoints. Trying alternative selectors..."
 
-    # The selector might be wrong, let's try to fix it
-    if [ $ATTEMPTS -eq 10 ]; then # Only try this after a few attempts
-      echo "Attempting to fix service selector..."
-
-      # Get the prometheus-server service selector
-      WORKING_SELECTOR=$(kubectl get svc -n ${PROMETHEUS_NAMESPACE} prometheus-server -o json | jq -r '.spec.selector | to_entries | map("\(.key)=\(.value)") | join(",")')
-
-      if [ -n "$WORKING_SELECTOR" ]; then
-        echo "Using working selector from prometheus-server service: ${WORKING_SELECTOR}"
-
-        # Update the external service
-        kubectl delete svc -n ${PROMETHEUS_NAMESPACE} prometheus-external
-
-        cat <<EOF | kubectl apply -f -
+    # Try alternative selector combinations
+    cat >prometheus-external-service-alt.yaml <<EOF
 apiVersion: v1
 kind: Service
 metadata:
@@ -410,15 +365,36 @@ spec:
     protocol: TCP
     name: http
   selector:
-    $(echo ${WORKING_SELECTOR} | sed 's/,/\n    /g')
+    app: prometheus
+    component: server
 EOF
-      else
-        # Last resort: Create a service that targets the prometheus-server service
-        echo "Creating a service that targets the prometheus-server service directly..."
 
-        kubectl delete svc -n ${PROMETHEUS_NAMESPACE} prometheus-external
+    kubectl delete svc -n ${PROMETHEUS_NAMESPACE} prometheus-external
+    kubectl apply -f prometheus-external-service-alt.yaml
+  fi
 
-        cat <<EOF | kubectl apply -f -
+  # Try to get the LoadBalancer address
+  ELB=$(kubectl get svc -n ${PROMETHEUS_NAMESPACE} prometheus-external -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+
+  if [ -n "$ELB" ] && [ "$ELB" != "<pending>" ]; then
+    # Check endpoints again
+    ENDPOINTS=$(kubectl get endpoints -n ${PROMETHEUS_NAMESPACE} prometheus-external -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null)
+
+    if [ -n "$ENDPOINTS" ]; then
+      print_success "LoadBalancer provisioned with working endpoints"
+      break
+    fi
+
+    # If still no endpoints, try one more approach as last resort
+    if [ $ATTEMPTS -eq 20 ] && [ -z "$ENDPOINTS" ]; then
+      print_warning "Still no endpoints. Creating direct endpoint connection..."
+
+      SERVER_IP=$(kubectl get svc -n ${PROMETHEUS_NAMESPACE} prometheus-server -o jsonpath='{.spec.clusterIP}')
+
+      kubectl delete svc -n ${PROMETHEUS_NAMESPACE} prometheus-external
+
+      # Create service and endpoints
+      cat >prometheus-external-direct.yaml <<EOF
 apiVersion: v1
 kind: Service
 metadata:
@@ -438,29 +414,12 @@ metadata:
   namespace: ${PROMETHEUS_NAMESPACE}
 subsets:
   - addresses:
-      - ip: $(kubectl get svc -n ${PROMETHEUS_NAMESPACE} prometheus-server -o jsonpath='{.spec.clusterIP}')
+      - ip: ${SERVER_IP}
     ports:
       - port: 80
 EOF
-      fi
-    fi
-  fi
 
-  # Try to get the LoadBalancer address
-  ELB=$(kubectl get svc -n ${PROMETHEUS_NAMESPACE} prometheus-external -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
-
-  if [ -n "$ELB" ] && [ "$ELB" != "<pending>" ]; then
-    # Check endpoints again
-    ENDPOINTS=$(kubectl get endpoints -n ${PROMETHEUS_NAMESPACE} prometheus-external -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null)
-
-    if [ -n "$ENDPOINTS" ]; then
-      print_success "LoadBalancer provisioned with working endpoints"
-      break
-    fi
-
-    if [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; then
-      print_warning "LoadBalancer provisioned but no endpoints found. Service configuration may be incorrect."
-      break
+      kubectl apply -f prometheus-external-direct.yaml
     fi
   fi
 
@@ -496,7 +455,6 @@ if [ -n "$ELB" ]; then
   else
     print_warning "Could not verify Prometheus response. It may need more time to initialize."
     print_warning "Try accessing http://${ELB} in your browser after a few minutes."
-    print_warning "If it still doesn't work, check the endpoints and service configuration."
   fi
 else
   print_warning "LoadBalancer address not yet available"
@@ -520,8 +478,8 @@ print_section "Summary and Next Steps"
 echo "Prometheus has been set up on your EKS cluster with the following components:"
 
 echo "1. Namespace: ${PROMETHEUS_NAMESPACE}"
-echo "2. Storage Class: ${STORAGE_CLASS}"
-echo "3. Persistent Volume for server: Enabled"
+echo "2. Storage Class: ${STORAGE_CLASS} (for server component)"
+echo "3. Alertmanager: Running without persistence"
 echo "4. LoadBalancer service: prometheus-external"
 echo ""
 
@@ -540,4 +498,4 @@ echo "3. Configure alerts if needed"
 print_success "Prometheus setup complete!"
 
 # Clean up temporary files
-rm -f prometheus-values.yaml
+rm -f prometheus-values.yaml prometheus-external-service.yaml prometheus-external-service-alt.yaml prometheus-external-direct.yaml 2>/dev/null
