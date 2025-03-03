@@ -8,7 +8,10 @@ This repository contains the infrastructure setup for a complete DevOps environm
 .
 ├── 00_terraform_backend/     # S3 and DynamoDB for Terraform state
 ├── 01_ec2_workstation/       # EC2 instance setup as a DevOps workstation
-├── (additional directories will be added as the project grows)
+├── 02_eks_creation/          # Scripts to create and configure EKS cluster
+├── 03_prometheus_setup/      # Setup scripts for Prometheus monitoring
+├── 04_grafana_setup/         # Setup scripts for Grafana dashboards
+└── 05_cleanup/               # Cleanup scripts to remove all resources
 ```
 
 ## Prerequisites
@@ -70,202 +73,156 @@ ssh -i ~/.ssh/pin ubuntu@<your-instance-public-ip>
 
 ## Step 4: Create an EKS Cluster
 
-Once connected to the EC2 instance, create an EKS cluster:
+Once connected to the EC2 instance, run the EKS initialization script:
 
 ```bash
-# Create the EKS cluster
-eksctl create cluster \
-  --name eks-mundos-e \
-  --region us-east-1 \
-  --node-type t3.small \
-  --nodes 3 \
-  --with-oidc \
-  --ssh-access \
-  --ssh-public-key pin \
-  --managed \
-  --full-ecr-access \
-  --zones us-east-1a,us-east-1b,us-east-1c
+# Navigate to the EKS creation directory
+cd ~/02_eks_creation
+
+# Make the script executable
+chmod +x initialize-eks.sh
+
+# Run the script
+./initialize-eks.sh
 ```
 
-This will take approximately 15-20 minutes to complete.
+The script will:
+- Create the EKS cluster with 3 nodes in different availability zones
+- Configure kubectl to connect to the cluster
+- Deploy a basic NGINX application with a LoadBalancer
+- Provide you with the URL to access NGINX
 
-## Step 5: Verify Cluster Access
+## Step 5: Set Up AWS EBS CSI Driver
 
-Once the cluster is created, verify that kubectl is properly configured:
+Before setting up Prometheus and Grafana, we need to install the AWS EBS CSI driver for persistent volumes:
 
 ```bash
-# Verify that kubectl is configured to use your cluster
-kubectl get nodes
+# Navigate to the Prometheus setup directory
+cd ~/03_prometheus_setup
 
-# You should see your 3 nodes listed as Ready
+# Make the script executable
+chmod +x 01-persistance-setup.sh
+
+# Run the script
+./01-persistance-setup.sh
 ```
 
-## Step 6: Deploy NGINX Test Application
+This script will:
+- Set up the necessary IAM roles and policies
+- Install the AWS EBS CSI driver as an EKS add-on
+- Create a storage class for Prometheus and Grafana persistent volumes
 
-Deploy a basic NGINX application to test the cluster:
-
-```bash
-# Create a NGINX deployment
-kubectl create deployment nginx --image=nginx
-
-# Expose the deployment with a LoadBalancer service
-kubectl expose deployment nginx --port=80 --type=LoadBalancer
-
-# Check the service
-kubectl get services
-
-# Wait until the EXTERNAL-IP is populated (not <pending>)
-```
-
-You can access the NGINX test application by visiting the EXTERNAL-IP address in your browser.
-
-## Step 7: Install EBS CSI Driver
-
-Before installing monitoring tools, we need to install the AWS EBS CSI driver to support persistent volumes:
-
-```bash
-# Install the AWS EBS CSI driver
-kubectl apply -k "github.com/kubernetes-sigs/aws-ebs-csi-driver/deploy/kubernetes/overlays/stable/?ref=release-1.20"
-
-# Verify the driver pods are running
-kubectl get pods -n kube-system | grep ebs
-```
-
-If the EBS CSI driver pods are stuck in pending state, you may need to add the EBS policy to your node IAM role:
-
-```bash
-# Get the node IAM role
-NODE_GROUP=$(eksctl get nodegroup --cluster eks-mundos-e -o json | jq -r '.[0].NodeInstanceRoleARN')
-
-# Attach the EBS policy to the role
-aws iam attach-role-policy --role-name $(echo $NODE_GROUP | cut -d "/" -f 2) --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
-```
-
-## Step 8: Install Prometheus
+## Step 6: Install Prometheus
 
 Install Prometheus for cluster monitoring:
 
 ```bash
-# Add the Prometheus Helm repository
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo update
+# Make the Prometheus setup script executable
+chmod +x 02-prometheus-setup.sh
 
-# Create namespace for Prometheus
-kubectl create namespace prometheus
-
-# Install Prometheus
-helm install prometheus prometheus-community/prometheus \
-  --namespace prometheus \
-  --set alertmanager.persistentVolume.storageClass="gp2" \
-  --set server.persistentVolume.storageClass="gp2"
-
-# Verify Prometheus pods are running
-kubectl get pods -n prometheus
-
-# Access Prometheus dashboard (port forwarding)
-kubectl port-forward -n prometheus svc/prometheus-server 9090:80
+# Run the script
+./02-prometheus-setup.sh
 ```
 
-With port forwarding, you can access the Prometheus dashboard at http://localhost:9090 in your browser.
+This script will:
+- Create a namespace for Prometheus
+- Deploy Prometheus using Helm
+- Configure persistent storage for Prometheus
+- Create a LoadBalancer service for external access
+- Provide you with the URL to access the Prometheus dashboard
 
-## Step 9: Install Grafana
+## Step 7: Install Grafana
 
 Install Grafana for visualization:
 
 ```bash
-# Create namespace for Grafana
-kubectl create namespace grafana
+# Navigate to the Grafana setup directory
+cd ~/04_grafana_setup
 
-# Add the Grafana Helm repository
-helm repo add grafana https://grafana.github.io/helm-charts
-helm repo update
+# Make the script executable
+chmod +x grafana-setup.sh
 
-# Create a values file for Grafana
-mkdir -p ${HOME}/environment/grafana
-cat << EOF > ${HOME}/environment/grafana/grafana.yaml
-datasources:
-  datasources.yaml:
-    apiVersion: 1
-    datasources:
-    - name: Prometheus
-      type: prometheus
-      url: http://prometheus-server.prometheus.svc.cluster.local
-      access: proxy
-      isDefault: true
-EOF
-
-# Install Grafana
-helm install grafana grafana/grafana \
-  --namespace grafana \
-  --set persistence.storageClassName="gp2" \
-  --set persistence.enabled=true \
-  --set adminPassword='EKS!sAWSome' \
-  --values ${HOME}/environment/grafana/grafana.yaml \
-  --set service.type=LoadBalancer
-
-# Get the Grafana load balancer URL
-export ELB=$(kubectl get svc -n grafana grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-echo "Grafana URL: http://$ELB"
-
-# Get the Grafana admin password
-kubectl get secret --namespace grafana grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
+# Run the script
+./grafana-setup.sh
 ```
 
-Access Grafana dashboard using the ELB URL and log in with:
+This script will:
+- Create a namespace for Grafana
+- Deploy Grafana using Helm
+- Configure Prometheus as a data source
+- Import Kubernetes dashboards (IDs: 3119 and 6417)
+- Create a LoadBalancer service for external access
+- Provide you with the URL and login credentials for Grafana
+
+Access Grafana dashboard using the provided URL and log in with:
 - Username: admin
-- Password: EKS!sAWSome (or the decoded password from the above command)
+- Password: EKS!sAWSome (or as configured in the script)
 
-## Step 10: Import Grafana Dashboards
+## Step 8: Explore Grafana Dashboards
 
-After logging into Grafana, import these useful Kubernetes dashboards:
+After logging into Grafana, you can explore the pre-imported dashboards:
 
-1. From the left sidebar, click the "+" icon and select "Import"
-2. Enter the dashboard ID: 3119 (Kubernetes: Cluster Monitoring)
-3. Select "Prometheus" as the data source
-4. Click "Import"
-5. Repeat for dashboard ID: 6417 (Kubernetes: Pod Monitoring)
+1. Click on the "Dashboards" menu in the left sidebar
+2. Select "Browse"
+3. Navigate to the "Kubernetes" folder
+4. Explore the "Kubernetes Cluster Monitoring" and "Kubernetes Pod Monitoring" dashboards
 
-## Step 11: Cleanup
+## Step 9: Cleanup
 
-When you're done with the project, clean up all resources to avoid unwanted AWS charges:
+When you're done with the project, clean up all resources to avoid unwanted AWS charges.
+
+First, clean up Kubernetes resources and delete the EKS cluster from the EC2 instance:
 
 ```bash
-# Delete Grafana and Prometheus
-helm uninstall prometheus --namespace prometheus
-kubectl delete ns prometheus
-helm uninstall grafana --namespace grafana
-kubectl delete ns grafana
-rm -rf ${HOME}/environment/grafana
+# Navigate to the cleanup directory
+cd ~/05_cleanup
 
-# Delete the EKS cluster
-eksctl delete cluster --name eks-mundos-e
+# Make the script executable
+chmod +x 01-cleanup-from-ec2.sh
 
-# Exit the EC2 instance
-exit
-
-# Navigate to the EC2 workstation directory
-cd 01_ec2_workstation
-
-# Delete the EC2 instance
-terraform destroy
-
-# Navigate to the Terraform backend directory
-cd ../00_terraform_backend
-
-# Delete the S3 bucket and DynamoDB table
-terraform destroy
+# Run the script
+./01-cleanup-from-ec2.sh
 ```
+
+Then, back on your local machine, clean up the Terraform resources:
+
+```bash
+# Navigate to the cleanup directory
+cd 05_cleanup
+
+# Make the script executable
+chmod +x 02-cleanup-from-local.sh
+
+# Run the script
+./02-cleanup-from-local.sh
+```
+
+This will clean up:
+- Grafana and Prometheus resources
+- EKS cluster and its resources
+- EC2 workstation
+- Terraform backend resources (S3 bucket and DynamoDB table)
 
 ## Troubleshooting
 
 ### EBS CSI Driver Issues
 
-If the EBS CSI driver pods are stuck in pending state, you likely need to add the Amazon EBS CSI Driver Policy to your node IAM role as described in Step 7.
+If the EBS CSI driver pods are stuck in pending state, the script in `03_prometheus_setup/01-persistance-setup.sh` should handle this by:
+- Creating the necessary IAM roles
+- Attaching the required policies
+- Setting up the EBS CSI driver as an EKS add-on
 
 ### Accessing Services
 
-- For services exposed with LoadBalancer, wait until the EXTERNAL-IP is populated
-- For port forwarding, ensure you're using the correct namespace and service name
+- For services exposed with LoadBalancer, the scripts will provide you with the URLs
+- If LoadBalancer URLs are not available, you can use port forwarding:
+  ```bash
+  # For Prometheus
+  kubectl port-forward -n prometheus svc/prometheus-server 9090:80 --address 0.0.0.0
+  
+  # For Grafana
+  kubectl port-forward -n grafana svc/grafana 3000:80 --address 0.0.0.0
+  ```
 
 ### Cluster Creation Failures
 
@@ -280,6 +237,7 @@ If cluster creation fails, examine the CloudFormation events in the AWS console 
 - [Kubernetes Documentation](https://kubernetes.io/docs/home/)
 - [Prometheus Documentation](https://prometheus.io/docs/introduction/overview/)
 - [Grafana Documentation](https://grafana.com/docs/grafana/latest/)
+- [AWS EKS Documentation](https://docs.aws.amazon.com/eks/latest/userguide/getting-started.html)
 
 ## License
 
